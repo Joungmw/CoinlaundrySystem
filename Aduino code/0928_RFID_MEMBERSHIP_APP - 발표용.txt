@@ -1,0 +1,386 @@
+#include <SoftwareSerial.h>
+SoftwareSerial RFID(D1, D0);                            //RFID 연결 RX and TX
+
+#include <ESP8266WiFi.h>                                                    // esp8266 library
+#include <FirebaseArduino.h>                                                // firebase library 
+  
+
+// PROJECT : 0908 RFID MEMBERSHIP FIREBASE  
+#define FIREBASE_HOST "rfid-membership-firebase.firebaseio.com"                         // the project name address from firebase id
+#define FIREBASE_AUTH "7eebi2NUxy9KEFNr5Q19uv2QhsgJlPD1bwpH0ovD"                    // the secret key generated from firebase
+ 
+#define WIFI_SSID "KT_GiGA_5G_Wave2_11A6"                                      // input your home or public wifi name 
+#define WIFI_PASSWORD "fc44gh2975"                                     //password of wifi ssid 
+   
+int data1 = 0;                                              
+int ok = -1;
+
+#define ACCEPT D2                                               // 파란 LED 연결핀
+#define REJECT D3                                               // 적색 LED 연결핀
+
+// use first sketch in http://wp.me/p3LK05-3Gk to get your tag numbers
+#define TOTAL_TAG  5                                            // 전체 태그수량
+int tag1[14] = {2,54,67,48,48,55,69,70,50,57,57,55,57,3};       // 태그1 번 정보
+int tag2[14] = {2,54,67,48,48,55,69,70,50,48,57,69,57,3}; 
+int tag3[14] = {2,54,67,48,48,55,69,70,50,49,53,70,53,3};  
+int tag4[14] = {2,54,67,48,48,55,69,70,50,51,65,68,65,3}; 
+int tag5[14] = {2,54,66,48,48,68,70,53,51,49,53,70,50,3}; 
+
+int newtag[14] = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0};                    // used for read comparisons
+int temptag[14];                                                    // 미사용 
+
+String tempStr;
+
+boolean WIFI_SET(){
+
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);                                     //try to connect with wifi
+    Serial.print("Connecting to ");
+    Serial.print(WIFI_SSID);
+    
+     while (WiFi.status() != WL_CONNECTED) {
+      Serial.print(".");
+      delay(500);
+    }
+    Serial.println();
+    Serial.print("Connected to ");
+    Serial.println(WIFI_SSID);
+    Serial.print("IP Address is : ");
+    Serial.println(WiFi.localIP());                                            //print local IP address
+    
+}
+   
+String comfirmedTag;
+
+void setup()
+{
+    RFID.begin(9600);    // start serial to RFID reader
+    Serial.begin(9600);  // start serial to PC 
+    Serial.println("begin");  
+    
+    pinMode(LED_BUILTIN, OUTPUT);                                         //Start reading dht sensor
+    digitalWrite(LED_BUILTIN, HIGH);
+    
+    WIFI_SET();  
+    
+    FIREBASE_SET();
+  
+    digitalWrite(LED_BUILTIN, LOW);         // OFF
+    
+    pinMode(ACCEPT, OUTPUT);              // for status LEDs
+    pinMode(REJECT, OUTPUT);
+
+    digitalWrite(ACCEPT,LOW);               // OFF
+    digitalWrite(REJECT,LOW);               // OFF
+}
+ 
+bool Read_state;
+
+bool readTags()                         // 태그 리딩함수 
+{
+  ok = -1;
+  int tag_no;
+  if(Read_state == false)               // 1회 동작용 상태값
+  {
+      if (RFID.available() > 0) 
+      {
+        // read tag numbers
+        delay(100); // needed to allow time for the data to come in from the serial buffer.
+    
+        for (int i = 0 ; i < 14 ; i++)  // read the rest of the tag
+        {
+          data1 = RFID.read();          // 태그값 리딩
+          temptag[i] = newtag[i] = data1;   // newtag배열에 저장 (temptag 미사용)
+          
+          Serial.print(newtag[i]);
+          if(i<13)              
+            Serial.print(",");
+        }
+        Serial.println("");
+        RFID.flush(); // stops multiple reads
+
+        // do the tags match up?
+        tag_no = checkmytags();              // 등록된 태그와 비교함수, 넘버 리턴
+        Read_state = true;                  // 상태값 변경
+      } 
+  }
+  else
+  { 
+      while(RFID.available()) RFID.read();  // EMPTY RX BUFFE  
+      if (!RFID.available()) 
+      {
+        Read_state = false; 
+        //Serial.println("Released");
+      }
+  }
+
+  // now do something based on tag type
+  if (ok > 0)                                            // if we had a match 
+  {
+    Serial.print("Accepted NO:"); Serial.println(tag_no);       // 등록된 태그넘버 출력
+    Serial.println("");
+    comfirmedTag="";
+    for(int i =0; i < 14; i++)                              // 태그 14개 숫자정보
+    {
+       comfirmedTag += newtag[i];
+    }
+
+    //Firebase.setString("TAG_READ",comfirmedTag);
+    
+    digitalWrite(ACCEPT, HIGH);           // 파란색 ON
+    delay(2000);
+    digitalWrite(ACCEPT, LOW);            // OFF
+    ok = -1;    
+    return true;                           // 등록된 태그를 읽을시 true값 리턴
+  } 
+    
+  else if (ok == 0)                     // if we didn't have a match
+  {
+    Serial.println("Rejected");
+   Serial.println("");
+    digitalWrite(REJECT, HIGH);         // 적색 ON
+    delay(2000);
+    digitalWrite(REJECT, LOW);  
+    ok = -1;
+  }
+  return false;                         // 등록된 태그일때를 제외하고 false return
+}
+
+boolean comparetag(int NEW_TAG[14], int OLD_TAG[14])        // 비교함수
+{
+  boolean result = false;                       // 초기값
+  int cnt = 0;                                  // 초기값
+  for (int i = 0 ; i < 14 ; i++)
+  {
+    if (NEW_TAG[i] == OLD_TAG[i])
+    {
+      cnt++;
+    }
+  }
+  if (cnt == 14)                    // 등록된 태그 읽힐시 카운터 14까지 발생되며 result true저장
+  {
+    result = true;
+  }
+  return result;
+}
+
+int tag;
+int checkmytags() // compares each tag against the tag just read
+{
+  ok = 0; // this variable helps decision-making,
+  // if it is 1 we have a match, zero is a read but no match,
+  // -1 is no read attempt made
+   // if (comparetag(newtag, tag1) == true & tag != 1)
+  if (comparetag(newtag, tag1) == true )            // 1번태그와 매치시
+  {
+    ok++;
+    tag = 1;                                        // 태그값 1
+    //Serial.println("111");
+  }
+   //  if (comparetag(newtag, tag2) == true & tag != 2)
+     if (comparetag(newtag, tag2) == true )
+  {
+    ok++;
+    tag = 2;
+    //Serial.println("222");
+  }
+   //  if (comparetag(newtag, tag3) == true & tag != 3)
+    if (comparetag(newtag, tag3) == true)
+  {
+    ok++;
+    tag = 3;
+    //Serial.println("333");
+  }
+   //  if (comparetag(newtag, tag4) == true & tag != 4)
+     if (comparetag(newtag, tag4) == true)
+  {
+    ok++;
+    tag = 4;
+    //Serial.println("444");
+  }
+   //if (comparetag(newtag, tag5) == true & tag != 5)
+     if (comparetag(newtag, tag5) == true)
+  {
+    ok++;
+    tag = 5;
+    //Serial.println("555");
+  }
+  return tag;
+}
+
+char buffer[20];
+int bufferIndex;  
+int DB_GET_CNT,DB_GET_CNT_STORED;
+bool MODE_STATE;
+String MODE_GET,Email_GET,TAG_GET;
+
+void READ_AND_FIRE()
+{ 
+   if(readTags())                                           // 기존 등록된 태그시 true
+   { 
+      
+      Serial.print("start"); 
+      while(Firebase.getString("TAG_INFO/MODE") == "")          // DB 모드값에 명령 저장시까지 대기
+      {
+        Serial.print(".");
+        delay(100);
+      }
+      Serial.println("\r\n");
+      
+      MODE_GET = Firebase.getString("TAG_INFO/MODE");           // DB child 명령 저장
+       
+       if(MODE_GET == "REGISTER"){                              // 등록메세지
+          while(DB_GET_CNT++ < TOTAL_TAG)                       // // 최대 5회 스캔 (TOTAL_TAG 숫자만큼)
+          {  
+               Email_GET = Firebase.getString("Member/User"+String(DB_GET_CNT)+"/email"); // DB email 값 스캔하여  해당유저 등록여부 스캔
+      
+               // Serial.print("Member/User"); Serial.println(String(DB_GET_CNT)+"/email");
+                Serial.print("Email_GET:");Serial.println(Email_GET);
+
+              if(Email_GET == "")                                                           // 해당자리 빈값이면 
+              {
+                   Serial.print("USER"); Serial.print(DB_GET_CNT);Serial.println(" EMPTY"); 
+                   //Serial.print("TAG_INFO/TAG_READ"); Serial.println(comfirmedTag);
+      
+                   Firebase.setString("TAG_INFO/USER_ORDER",String(DB_GET_CNT));          //  자리값 DB TAG_INFO/USER_ORDER에 저장 (안드로이드에서 읽음)
+                   //delay(1000);
+                   Firebase.setString("TAG_INFO/TAG_READ",comfirmedTag);                        // 태그값 DB 저장 (현재 읽은 태그값 DB에서 보여줌, 다른기능 없음)
+                   DB_GET_CNT_STORED = DB_GET_CNT;                                          // 자리값 DB_GET_CNT_STORED 저장
+                   //MODE_GET ="";
+                   break;                                                                   // while문 break
+              } 
+              else{
+                  //Serial.print("USER");Serial.print(DB_GET_CNT); Serial.println(" EXIST");
+              }
+           }
+           DB_GET_CNT = 0;
+           MODE_STATE = true;
+           Serial.println("end");   
+       }
+       else if(MODE_GET == "RF_LOG")                                                    // 태그로 로그인 조건문
+       {
+           while(DB_GET_CNT++ < TOTAL_TAG)                                              // 최대 5회 스캔
+            {  
+                 TAG_GET = Firebase.getString("Member/User"+String(DB_GET_CNT)+"/tag");     // DB에 User별 tag 값 리딩
+
+                 // Serial.print("Member/User"); Serial.println(String(DB_GET_CNT)+"/email");
+                //Serial.print("TAG_GET:");Serial.println(TAG_GET);
+
+                if(TAG_GET != "")                                                           // 값이 있을시
+                {
+                     if(TAG_GET == comfirmedTag)                                            // DB에 등록된 태그와 현재 읽은 comfirmedTag 태그값 일치시
+                     {
+                           String ID_GET = Firebase.getString("Member/User"+String(DB_GET_CNT)+"/email");   // DB의 해당 ID값 저장
+                           
+                           Firebase.setString("LAUNDRY_INFO/ACCOUNT",ID_GET);                     // ACCOUNT에 EMAIL 전송 (해당값은 세탁기 화면에서 USER 아이디로 불러들인다)
+                           Firebase.setString("TAG_INFO/MODE","");                                 // MODE값 지움
+                           //Firebase.setString("TAG_INFO/RF_STATE","OK");    
+                           
+                           Serial.print("ID_GET:"); Serial.println(ID_GET); 
+                           Serial.print("DB_GET_CNT:"); Serial.println(DB_GET_CNT);   
+                           Serial.print("comfirmedTag:"); Serial.println(comfirmedTag);   
+                           //MODE_GET = TAG_GET = "";
+                           break;                                                           
+                     }
+                }
+                else{
+                    //Serial.print("USER");Serial.print(DB_GET_CNT); Serial.println(" EXIST");
+                }
+             }
+             DB_GET_CNT = 0; 
+             Serial.println("end");   
+       }
+       else if(MODE_GET == "")
+       {
+         Serial.println("NOT A NORMAL PROCESS");
+       }
+    }
+    
+    if(MODE_STATE == true)                                                  // 회원가입 후 태그등록 조건문
+    {    
+        Serial.print("waiting");
+       // MODE_GET = Firebase.getString("TAG_INFO/MODE"); 
+        while(Firebase.getString("TAG_INFO/MODE") != "SET")                 // 어플에서 REGISTER 버튼 입력시 MODE 값 SET으로 설정되며 적용될때까지 대기
+        {
+          Serial.print(".");
+          delay(100);
+        }
+        Serial.println("\r\n");
+        
+        Firebase.setString("Member/User"+String(DB_GET_CNT_STORED)+"/tag",comfirmedTag);                // DB_GET_CNT_STORED 자리값에 태그값 저장
+        Serial.print("DB_USER:");Serial.print(DB_GET_CNT_STORED);Serial.print(" DB_TAG:");Serial.println(comfirmedTag);
+        Firebase.setString("TAG_INFO/MODE","");                             // MODE값 초기화
+        DB_GET_CNT_STORED = 0;
+        MODE_STATE = false; 
+        MODE_GET = ""; 
+    }
+}
+
+unsigned long TIMER;
+String MC_UPDATE;
+   
+String currentTime;
+unsigned long TIMER_CNT;
+bool TIMER_STATE;
+
+void loop()
+{  
+  READ_AND_FIRE();  
+   
+}
+  
+void FIREBASE_SET(){                                                           
+
+    Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);                              // connect to firebase 
+   
+    for(int j =0; j<TOTAL_TAG; j++)
+    {
+        tempStr="";
+        for(int a = 0; a < 14; a++)
+        {
+            if(j == 0)
+              tempStr += tag1[a];
+            else if(j == 1)
+              tempStr += tag2[a];  
+            else if(j == 2)
+              tempStr += tag3[a];  
+            else if(j == 3)
+              tempStr += tag4[a];
+            else
+              tempStr += tag5[a];
+        }
+        //Serial.println(tempStr);
+        Firebase.setString("TAG_LIST/tag"+String(j+1),tempStr);             // DB에 초기 태그값 등록 
+        Firebase.setString("LAUNDRY_INFO/MC"+String(j+1),"");               // DB에 세탁기 시간값 저장용 child 생성
+        delay(100);
+    }
+
+    if(Firebase.getString("TAG_INFO/MODE") == "")                   // DB에 아래 임시 저장값 있을시엔 건드리지 않기위해 모드값 비어 있을시에만 동작
+    {
+        Firebase.setString("LAUNDRY_INFO/ACCOUNT","");               // 세탁기 상태 업데이트 요청 child값
+        Firebase.setString("TAG_INFO/USER_ORDER","");            // DB에 빈 유저 넘버자리 찾는 임시 child값
+        Firebase.setString("TAG_INFO/MODE","");                   // DB에 현 모드상태(set,log 등) 임시 child값
+        Firebase.setString("TAG_INFO/TAG_READ","");               // DB에 현재 읽은 TAG값 넣는 임시 child값
+        //Firebase.setString("TAG_INFO/RF_STATE","");               // DB에 현재 태그 리딩 상태값 저장 임시 child값
+        Serial.println("TAG INFO INITIALIZED ==============  \r\n");
+    }
+    else
+    { 
+        Serial.println("TAG INFO NOT EMPTY ==============  \r\n");
+    }
+ 
+}   
+
+void READ_ID()                                                      // 시리얼 모니터로 테스트 함수
+{
+  while(Serial.available())
+  { 
+      buffer[bufferIndex] = Serial.read();   //시리얼 통신으로 버퍼배열에 데이터 수신       (숫자 입력시 해당 User id 출력)
+      bufferIndex++;      
+      
+      int b =atoi(buffer); 
+      Serial.println(b);  
+      String TAG_GET = Firebase.getString("Member/User"+String(b)+"/ID");
+      Serial.println(TAG_GET); 
+      bufferIndex =0;
+  }
+}
